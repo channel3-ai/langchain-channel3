@@ -5,20 +5,35 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 from urllib.parse import urlparse
 
-from channel3_sdk import AsyncChannel3, Channel3
+from channel3_sdk import ApiError, AsyncChannel3, Channel3
 from channel3_sdk.types.product import Product
 from langchain_core.callbacks import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun
-from langchain_core.tools import BaseTool
+from langchain_core.tools import BaseTool, ToolException
 from pydantic import BaseModel, Field, SecretStr, model_validator
 
 from langchain_channel3._format import product_detail, product_summary, summarize_search
 
 CONVERSATION_ID_HEADER = "X-Conversation-Id"
 _CHANNEL3_HOSTS = {"trychannel3.com", "channel3.ai"}
+
+
+def _tool_exception(error: ApiError) -> ToolException:
+    """A readable error for the model, keyed on the Channel3 API status code."""
+    status = error.status_code
+    if status in (401, 403):
+        message = "Channel3 rejected the API key. Check CHANNEL3_API_KEY."
+    elif status == 402:
+        message = "The Channel3 account is out of credits. Add credits at https://channel3.ai."
+    else:
+        body = error.body
+        detail = body.get("detail", body) if isinstance(body, dict) else body
+        message = f"Channel3 API error {status}: {detail}"
+    return ToolException(message)
 
 
 class _Channel3ToolBase(BaseTool):
@@ -32,6 +47,8 @@ class _Channel3ToolBase(BaseTool):
     """Groups one chat's calls together in your Channel3 analytics. Sent as ``X-Conversation-Id``."""
 
     response_format: Literal["content", "content_and_artifact"] = "content_and_artifact"
+    handle_tool_error: Optional[Union[bool, str, Callable[[ToolException], str]]] = True
+    """Returns Channel3 API errors to the model as the tool result. Set ``False`` to raise them."""
 
     @model_validator(mode="after")
     def _resolve_api_key(self) -> _Channel3ToolBase:
@@ -152,7 +169,10 @@ class Channel3SearchProducts(_Channel3ToolBase):
         image_url: Optional[str] = None,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> tuple[str, dict[str, Any]]:
-        page = self._client().products.search(**self._search_kwargs(query, image_url))
+        try:
+            page = self._client().products.search(**self._search_kwargs(query, image_url))
+        except ApiError as error:
+            raise _tool_exception(error) from error
         return self._result(query, image_url, list(page.items or []))
 
     async def _arun(
@@ -161,7 +181,12 @@ class Channel3SearchProducts(_Channel3ToolBase):
         image_url: Optional[str] = None,
         run_manager: Optional[AsyncCallbackManagerForToolRun] = None,
     ) -> tuple[str, dict[str, Any]]:
-        page = await self._async_client().products.search(**self._search_kwargs(query, image_url))
+        try:
+            page = await self._async_client().products.search(
+                **self._search_kwargs(query, image_url)
+            )
+        except ApiError as error:
+            raise _tool_exception(error) from error
         return self._result(query, image_url, list(page.items or []))
 
 
@@ -241,7 +266,9 @@ class Channel3GetProducts(_Channel3ToolBase):
         products = [product_detail(o) for o in outcomes if isinstance(o, Product)]
         if not products:
             failure = next((o for o in outcomes if isinstance(o, BaseException)), None)
-            raise failure if failure else ValueError("No products resolved.")
+            if isinstance(failure, ApiError):
+                raise _tool_exception(failure) from failure
+            raise failure if failure else ToolException("No products resolved.")
         result: dict[str, Any] = {"products": products}
         unresolved = [
             pid for pid, o in zip(product_ids, outcomes, strict=True) if not isinstance(o, Product)

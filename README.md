@@ -60,10 +60,12 @@ Offer URLs are Channel3 buy links, so purchases earn affiliate commission for th
 ## Options
 
 ```python
-from langchain_channel3 import Channel3SearchProducts
+from langchain_channel3 import Channel3Toolkit
 
-search = Channel3SearchProducts(api_key="...", conversation_id=chat_id, limit=12)
+tools = Channel3Toolkit(api_key="...", conversation_id=chat_id, limit=12).get_tools()
 ```
+
+The tool classes take the same options individually, for example `Channel3SearchProducts(limit=12)`.
 
 | Option | Description |
 | --- | --- |
@@ -72,7 +74,11 @@ search = Channel3SearchProducts(api_key="...", conversation_id=chat_id, limit=12
 | `limit` | Products per search, from 1 to 30. Defaults to 8. Search tool only. |
 | `base_url` | Overrides the API base URL. |
 
-`channel3_tools(**options)` returns both tools with shared options.
+`channel3_tools(**options)` is shorthand for `Channel3Toolkit(**options).get_tools()`.
+
+## Errors
+
+API errors go back to the model as the tool result, for example "Channel3 rejected the API key" or "The Channel3 account is out of credits", so the agent can explain the problem instead of crashing the run. Pass `handle_tool_error=False` to a tool to raise them as `ToolException` instead.
 
 ## Links
 
